@@ -484,6 +484,8 @@ const ACTIONS={
     {id:'toggleHold',n:'9',label:'Square: heading hold on / off',def:[{b:2}],key:'KeyH'},
     {id:'intakeIn',n:'11',label:'Intake balls in',def:[{b:6}],key:'KeyF'},
     {id:'intakeOut',n:'18',label:'Intake balls out',def:[{b:7}],key:'KeyG'},
+    {id:'soloUp',n:'solo',label:'Solo assist only: climb up (opens the climber)',def:[{b:0}],key:''},
+    {id:'soloDown',n:'solo',label:'Solo assist only: climb down',def:[{b:1}],key:''},
     {id:'start',n:'8',label:'Start / pause (trainer only)',def:[{b:9}],key:'Enter'}
   ],
   d2:[
@@ -499,7 +501,7 @@ const ACTIONS={
     {id:'start',n:'8',label:'Start / pause (trainer only)',def:[{b:9}],key:'Enter'}
   ]
 };
-const KEYNAME=c=>c.replace(/^Key/,'').replace(/^Arrow/,'Arrow ');
+const KEYNAME=c=>c?c.replace(/^Key/,'').replace(/^Arrow/,'Arrow '):'-';
 function defBinds(){const o={d1:{},d2:{}};for(const k of ['d1','d2'])for(const a of ACTIONS[k])o[k][a.id]=a.def.map(x=>Object.assign({},x));return o;}
 let BINDS=Object.assign(defBinds(),store.get('fgcsim.binds',{}));
 for(const k of ['d1','d2']){BINDS[k]=Object.assign(defBinds()[k],BINDS[k]||{});}
@@ -605,7 +607,7 @@ function readDriver(k){
   for(const a of ACTIONS[side]){
     let on=false;
     if(v)for(const b of BINDS[side][a.id]||[]){if(b.b!=null?(v.vals[b.b]||0)>0.5:((v.axes[b.a]||0)*b.d>0.55&&!s.gate[b.a])){on=true;break;}}
-    if(keys.has(a.key))on=true;
+    if(a.key&&keys.has(a.key))on=true;
     out.act[a.id]=on;out.edge[a.id]=on&&!prevAct[k][a.id];
   }
   prevAct[k]=out.act;
@@ -784,10 +786,11 @@ function processInput(dt){
   if(soloAssist()){
     r.thrower=true;r.collector=true;
     r.feeder=(S.pred&&S.pred.res==='score'&&r.hopper>0&&r.rpm>0.9)?'on':'off';
-    const B=braceOf(r),p=braceProj(B,r.x,r.y);
-    if(p.t>-0.05&&p.t<0.45&&p.d<1.2)r.climberExp=true;
-    if(climbReady(r))r.climbDir=1;
-    if(r.attached&&Math.hypot(r.stick.x,r.stick.y)>0.3&&r.lift>0)r.climbDir=-1;
+    // climbing stays manual: Cross climbs up (opening the climber first), Circle climbs down
+    if(d1.edge.soloUp||d2.edge.climbUp){r.climberExp=true;r.climbDir=1;r.climbArm=0;}
+    if(d1.edge.soloDown||d2.edge.climbDown)r.climbDir=-1;
+    if(d2.edge.climbStop)r.climbDir=0;
+    if(d2.edge.climber)r.climberExp=!r.climberExp;
   }else{
     if(d2.edge.throwerOn)r.thrower=true;
     if(d2.edge.throwerOff)r.thrower=false;
@@ -795,7 +798,7 @@ function processInput(dt){
     if(d2.edge.climber){r.climberExp=!r.climberExp;}
     if(d2.edge.feeder){r.feeder=r.feeder==='off'?'on':r.feeder==='on'?'rev':'off';}
     if(d2.edge.feed&&r.feedCool<=0&&r.hopper>0){launch(r);r.feedCool=0.12;}
-    if(d2.edge.climbUp)r.climbDir=1;
+    if(d2.edge.climbUp){r.climbDir=1;r.climbArm=0;}
     if(d2.edge.climbDown)r.climbDir=-1;
     if(d2.edge.climbStop)r.climbDir=0;
   }
@@ -973,15 +976,20 @@ function climbAdvice(r){
   if(p.t>ATTACH_MAX)return {t:'Too high: grab the Zone 1 end',c:'warn'};
   if(p.d>0.36||p.t<0.02)return {t:'Get onto the brace',c:'warn'};
   const e=wrap(r.th-B.up)/D2R;if(Math.abs(e)>25)return {t:`Align with brace ${e>0?'-':'+'}${Math.abs(e).toFixed(0)}°`,c:'warn'};
-  return {t:'Ready: climb up',c:'ok'};
+  return {t:r.isPlayer&&soloAssist()?'Ready: press Cross to climb':'Ready: climb up',c:'ok'};
 }
 function stepClimb(r,dt){
   const B=braceOf(r);
   if(!r.attached){
     if(r.climbDir===1&&climbReady(r)){
-      const p=braceProj(B,r.x,r.y);r.attached=true;r.braceT=r.attachT=clamp(p.t,0.02,ATTACH_MAX);r.vx=r.vy=r.w=0;r.wheelV=[0,0,0,0];r.holdTarget=null;
+      const p=braceProj(B,r.x,r.y);r.attached=true;r.climbArm=0;r.braceT=r.attachT=clamp(p.t,0.02,ATTACH_MAX);r.vx=r.vy=r.w=0;r.wheelV=[0,0,0,0];r.holdTarget=null;
       if(r.isPlayer){rumble(1,0.6,0.6,160);rumble(0,0.4,0.4,120);SND.clank(r.x,r.y);toast('Hooked on the brace');ST.climbStart=S.t;}
-    }
+    }else if(r.climbDir===1&&r.lift===0){
+      // the climb motor spins briefly; if the wheels haven't found the brace by then it stops, so it can't grab later by surprise
+      r.climbArm=(r.climbArm||0)+dt;
+      if(r.climbArm>1.2){r.climbDir=0;r.climbArm=0;
+        if(r.isPlayer){const a=climbAdvice(r);toast('Climber missed the brace: '+(a&&a.c==='warn'?a.t.toLowerCase():'drive onto the low (Zone 1) end of the brace first'));}}
+    }else r.climbArm=0;
     return;
   }
   if(!r.climberExp){
@@ -1506,7 +1514,7 @@ function updateHud(){
   const extra=nPads>2?` Chrome sees ${nPads} controllers: extra ones are ignored until you press a button on them.`:'';
   if(blocked&&!IN_FRAME){hint.className='hint warn';hint.textContent='This browser is blocking controllers for this page. Try Chrome or Edge.';}
   else if(pads[0]===null){hint.className='hint';hint.textContent='Press any button on the Driver 1 controller, then on the Driver 2 controller. A controller only drives after you press one of its buttons.'+extra;}
-  else{hint.className='hint';hint.textContent=(pads[1]===null?'Driver 1 is set. Press a button on a second controller for Driver 2, or let solo assist run it.':'Both drivers set. If a button does the wrong thing, run button setup for that controller.')+extra;}
+  else{hint.className='hint';hint.textContent=(pads[1]===null?(cfg.assist?'Driver 1 is set. Solo assist runs the thrower and feeder until a second controller is paired. You climb with Cross (up) and Circle (down).':'Driver 1 is set. Press a button on a second controller for Driver 2.'):'Both drivers set. If a button does the wrong thing, run button setup for that controller.')+extra;}
   {const cb=$('connectBox'),show=pads[0]===null&&!keys.size&&!S.usedKeys&&!IN_FRAME&&!S.paused&&S.phase!=='ended';cb.hidden=!show;
     if(show){$('connectTitle').textContent=nPads?'Press any button':'Connect a controller';$('connectText').textContent=nPads?'on the Driver 1 controller. The first controller you press drives, the second one runs Driver 2.':'Plug in a controller (or turn it on), then press any button on it. No controller? Use W A S D and Q E.';}
     $('cpad1').classList.toggle('ok',pads[0]!==null);$('cpad2').classList.toggle('ok',pads[1]!==null);}
@@ -2210,7 +2218,7 @@ function frame(now){
   requestAnimationFrame(frame);
 }
 bindSettings();renderBinds();updateBest();sizeCanvas();resetField('free');
-if(/[?&]debug/.test(location.search))window.FGC={S,step,cfg,PH,resetField,launch,predictShot,PS,pads,V3,SND,run(sec){for(let i=0;i<sec/PH;i++)step(PH);}};
+if(/[?&]debug/.test(location.search))window.FGC={S,step,cfg,PH,resetField,launch,predictShot,PS,pads,V3,SND,G,braceAt,climbReady,run(sec){for(let i=0;i<sec/PH;i++)step(PH);}};
 if(!/[?&]no3d/.test(location.search))(document.fonts&&document.fonts.ready?Promise.race([document.fonts.ready,new Promise(r=>setTimeout(r,1500))]):Promise.resolve()).then(()=>{init3D();sizeCanvas();});
 requestAnimationFrame(frame);
 })();
