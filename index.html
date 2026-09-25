@@ -489,7 +489,10 @@ function vpad(g){
 
 const keys=new Set();
 let pads=[null,null], padBlocked=false, padList=[], rebind=null, WIZ=null;
-const prevAct=[{},{}], prevV=[[],[]], VP=[null,null];
+const prevAct=[{},{}], prevV=[[],[]], VP=[null,null], gate=[[1,1,1,1],[1,1,1,1]], held=[false,false];
+/* A controller only becomes a driver when a button is pressed on it (so a pad lying on the desk can't take over),
+   and each stick is ignored until it has been back in the centre once (so a stuck or pushed stick can't drive). */
+function assignPad(k,idx){pads[k]=idx;gate[k]=[1,1,1,1];held[k]=true;VP[k]=null;toast(`This controller is now Driver ${k+1}`);setTimeout(()=>rumble(k,0.5,0.6,180),30);}
 const HOSTED='https://matetheakhaladze.github.io/fgc-drive-trainer/';
 const IN_FRAME=(()=>{try{return window.self!==window.top;}catch(e){return true;}})();
 function pollPads(){
@@ -499,15 +502,17 @@ function pollPads(){
   for(let k=0;k<2;k++){if(pads[k]!==null&&!list[pads[k]])pads[k]=null;}
   for(const g of list){
     if(!g||pads.includes(g.index))continue;
-    if(pads[0]===null)pads[0]=g.index;else if(pads[1]===null)pads[1]=g.index;
+    if(!vpad(g).vals.some(x=>x>0.5))continue;
+    if(pads[0]===null)assignPad(0,g.index);else if(pads[1]===null)assignPad(1,g.index);
   }
-  for(let k=0;k<2;k++){const g=padOf(k);VP[k]=g?vpad(g):null;}
+  for(let k=0;k<2;k++){const g=padOf(k);VP[k]=g?vpad(g):null;
+    if(VP[k]){for(let i=0;i<4;i++)if(gate[k][i]&&Math.abs(VP[k].axes[i])<0.2)gate[k][i]=0;if(held[k]&&!VP[k].vals.some(x=>x>0.3))held[k]=false;}}
 }
 const padOf=k=>pads[k]!==null?(padList[pads[k]]||null):null;
 function readDriver(k){
   const g=padOf(k), v=VP[k], side=k?'d2':'d1';
   const out={lx:0,ly:0,rx:0,ry:0,act:{},edge:{},g};
-  if(v){out.lx=v.axes[0];out.ly=v.axes[1];out.rx=v.axes[2];out.ry=v.axes[3];}
+  if(v){const G=gate[k];out.lx=G[0]?0:v.axes[0];out.ly=G[1]?0:v.axes[1];out.rx=G[2]?0:v.axes[2];out.ry=G[3]?0:v.axes[3];}
   for(const a of ACTIONS[side]){
     let on=false;
     if(v)for(const b of BINDS[side][a.id]||[]){if(b.b!=null?(v.vals[b.b]||0)>0.5:((v.axes[b.a]||0)*b.d>0.55)){on=true;break;}}
@@ -526,6 +531,7 @@ function readDriver(k){
     out.edge={};
   }
   if(v)prevV[k]=v.vals.slice();
+  if(held[k])out.edge={};
   if(rebind||WIZ){out.edge={};out.lx=out.ly=out.rx=out.ry=0;}
   return out;
 }
@@ -596,7 +602,7 @@ function rawText(){
   const gs=padList.filter(Boolean);
   if(!gs.length)return IN_FRAME?'Chrome is not giving this page any controllers.\nThis page is inside the Claude preview, which blocks them.':'No controllers yet. Press a button on each one.';
   return gs.map(g=>{
-    const who=pads[0]===g.index?'Driver 1':pads[1]===g.index?'Driver 2':'unused';
+    const who=pads[0]===g.index?'Driver 1':pads[1]===g.index?'Driver 2':'not driving (press a button on it to use it)';
     const p=g.buttons.map((b,i)=>(b.pressed||b.value>0.5)?i:null).filter(x=>x!==null);
     const prof=PROFILES[g.id]?'your setup':g.mapping==='standard'?'standard':'guessed layout';
     return `${who}: ${g.id}\n  mapping: ${g.mapping||'none'} (${prof}), ${g.buttons.length} buttons, ${g.axes.length} axes\n  buttons down: ${p.length?p.join(', '):'none'}\n  axes: ${g.axes.map(a=>a.toFixed(2)).join('  ')}`;
@@ -681,9 +687,10 @@ function processInput(dt){
   const c=Math.cos(r.th), s=Math.sin(r.th);
   const y=wx*c+wy*s, x=-wx*s+wy*c;
   let rx=dz(d1.rx);
-  if(rx!==0){r.autoTurn=null;r.holdTarget=r.th;}
-  else if(r.autoTurn!==null){const e=wrap(r.autoTurn-r.th);rx=clamp(e*1.6-r.w*0.07,-0.9,0.9);if(Math.abs(e)<1.5*D2R&&Math.abs(r.w)<0.4){r.holdTarget=r.autoTurn;r.autoTurn=null;}}
-  else if(r.hold){const e=wrap(r.holdTarget-r.th);rx=Math.abs(e)<0.004?0:clamp(e*1.6-r.w*0.07,-0.9,0.9);}
+  if(rx!==0){r.autoTurn=null;r.holdTarget=null;}
+  else if(r.autoTurn!==null){const e=wrap(r.autoTurn-r.th);rx=clamp(e*1.2-r.w*0.09,-0.8,0.8);if(Math.abs(e)<1.5*D2R&&Math.abs(r.w)<0.4){r.holdTarget=r.autoTurn;r.autoTurn=null;}}
+  else if(r.hold){if(r.holdTarget==null&&Math.abs(r.w)<0.6)r.holdTarget=r.th;
+    if(r.holdTarget!=null){const e=wrap(r.holdTarget-r.th);rx=Math.abs(e)<0.004?0:clamp(e*1.2-r.w*0.09,-0.8,0.8);}}
   const den=Math.max(Math.abs(y)+Math.abs(x)+Math.abs(rx),1), pw=cfg.power;
   r.wheelCmd=[(y+x+rx)/den*pw,(y-x-rx)/den*pw,(y-x+rx)/den*pw,(y+x-rx)/den*pw]; // FL FR BL BR
   const V=wheelSpeed()*SQ2*pw;r.cmd.vx=wx*V;r.cmd.vy=wy*V;
@@ -838,7 +845,7 @@ function stepClimb(r,dt){
   }
   const p=braceAt(B,r.braceT),k=Math.min(1,dt*12);
   r.x+=(p.x-r.x)*k;r.y+=(p.y-r.y)*k;r.th+=wrap(B.up-r.th)*Math.min(1,dt*10);
-  r.vx=r.vy=r.w=0;
+  r.vx=r.vy=r.w=0;r.holdTarget=null;
   if(r.isPlayer&&ST.climbTime==null&&climbState(r)==='3'&&ST.climbStart!=null)ST.climbTime=S.t-ST.climbStart;
   if(r.lift===0&&r.climbDir===0&&Math.hypot(r.cmd.vx,r.cmd.vy)>0.2)r.attached=false;
 }
@@ -1213,14 +1220,14 @@ function updateHud(){
   // pads
   for(let k=0;k<2;k++){const g=padOf(k),el=$('pad'+(k+1));
     const how=g?(PROFILES[g.id]?' (your setup)':g.mapping==='standard'?'':' (guessed layout: run setup)'):'';
-    el.innerHTML=g?`<span class="dot live"></span>${esc(g.id.replace(/\s*\(.*$/,'').slice(0,40)||'Controller')}${how}`:`<span class="dot"></span>${k===1&&soloAssist()?'Solo assist is running Driver 2':'Press any button'}`;}
+    el.innerHTML=g?`<span class="dot live"></span>#${g.index+1} ${esc(g.id.replace(/\s*\(.*$/,'').slice(0,40)||'Controller')}${how}${gate[k].some(x=>x)?' (centre the sticks)':''}`:`<span class="dot"></span>${k===1&&soloAssist()?'Solo assist is running Driver 2':'Press any button'}`;}
   const hint=$('padHint'),fw=$('frameWarn');
   let fp=null;try{fp=document.featurePolicy||document.permissionsPolicy;}catch(e){}
   const blocked=padBlocked||(fp&&fp.allowsFeature&&!fp.allowsFeature('gamepad'));
   if(IN_FRAME&&padList.filter(Boolean).length===0){fw.hidden=false;fw.innerHTML=`Controllers don't work inside the Claude preview. Open the trainer on its own page: <a href="${HOSTED}" target="_blank" rel="noopener">${esc(HOSTED.replace(/^https?:\/\//,''))}</a>`;}
   else fw.hidden=true;
   if(blocked&&!IN_FRAME){hint.className='hint warn';hint.textContent='This browser is blocking controllers for this page. Try Chrome or Edge.';}
-  else if(pads[0]===null){hint.className='hint';hint.textContent='Plug in both pads, click on this page, then press a button on each. The first pad you press becomes Driver 1.';}
+  else if(pads[0]===null){hint.className='hint';hint.textContent='Press any button on the Driver 1 controller, then on the Driver 2 controller. A controller only drives after you press one of its buttons.';}
   else{hint.className='hint';hint.textContent=pads[1]===null?'One controller found. Keyboard or solo assist covers Driver 2.':'Both drivers connected. If a button does the wrong thing, run setup for that pad.';}
   const ro=$('rawOut');if(ro.closest('details').open)ro.textContent=rawText();
   $('soloBtn').textContent='Solo assist: '+(cfg.assist?'on':'off');
@@ -1304,7 +1311,7 @@ function bindSettings(){
 }
 $('resetBinds').onclick=()=>{BINDS=defBinds();saveBinds();rebind=null;renderBinds();toast('Default buttons restored');};
 $('resetCfg').onclick=()=>{cfg=Object.assign({},DEF_CFG);saveCfg();bindSettings();resetField(S.mode);toast('Default settings restored');};
-$('swapPads').onclick=()=>{pads=[pads[1],pads[0]];toast('Drivers swapped');};
+$('swapPads').onclick=()=>{pads=[pads[1],pads[0]];gate.reverse();held.reverse();gate[0]=[1,1,1,1];gate[1]=[1,1,1,1];toast('Drivers swapped');[0,1].forEach(k=>setTimeout(()=>rumble(k,0.5,0.6,160),k*350));};
 function setCam(c){cfg.cam=c;saveCfg();bindSettings();toast({driver:'Driver station view',chase:'Behind the robot',top:'Overhead'}[c]);}
 document.querySelectorAll('.camchips [data-cam]').forEach(b=>b.onclick=()=>setCam(b.dataset.cam));
 $('mapBtn').onclick=()=>{cfg.map=!cfg.map;saveCfg();sizeCanvas();bindSettings();};
@@ -1331,6 +1338,7 @@ window.addEventListener('keydown',e=>{
 });
 window.addEventListener('keyup',e=>keys.delete(e.code));
 window.addEventListener('blur',()=>keys.clear());
+document.addEventListener('visibilitychange',()=>{if(document.hidden){keys.clear();gate[0]=[1,1,1,1];gate[1]=[1,1,1,1];}});
 window.addEventListener('gamepadconnected',e=>{toast('Controller connected: '+(e.gamepad.id||'').slice(0,32));});
 window.addEventListener('gamepaddisconnected',()=>{toast('Controller disconnected');});
 window.addEventListener('resize',sizeCanvas);
